@@ -1,0 +1,296 @@
+import easyocr
+import cv2
+import numpy as np
+import re
+import os
+import matplotlib.pyplot as plt
+import csv
+import pandas as pd
+
+# === CONFIG ===
+image_path = r"C:\Users\Dell\Pictures\trainee\IMG_3739.JPG"
+output_txt_path = r"C:\Users\Dell\Downloads\code\output.txt"
+
+# === โหลดภาพ ===
+image = cv2.imread(image_path)
+
+# พิกัดเริ่ม
+x, y, w, h = 300, 60, 660, 1400  # เปลี่ยน h ให้ยาวขึ้น
+
+# ตรวจสอบขนาดภาพ
+h_img, w_img = image.shape[:2]
+
+# ตัดภาพโดยไม่ให้เกินขนาดจริง
+x_end = min(x + w, w_img)
+y_end = min(y + h, h_img)
+
+cropped = image[y:y_end, x:x_end]
+
+# แสดงผลรูปที่ครอป
+#cv2.namedWindow('Cropped', cv2.WINDOW_NORMAL)
+#cv2.imshow('Cropped', cropped)
+#cv2.imwrite('cropped_output.png', cropped)
+
+#cv2.waitKey(0)
+#cv2.destroyAllWindows()
+
+# === Grayscale และเพิ่ม Contrast ===
+gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
+equalized = cv2.equalizeHist(gray)
+enhanced = cv2.convertScaleAbs(equalized, alpha=1.5, beta=0)
+
+# ใช้ Adaptive Thresholding
+adaptive_thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
+                                       cv2.THRESH_BINARY, 35, 37)
+
+# === แปลง adaptive_thresh เป็น BGR สำหรับ EasyOCR ===
+adaptive_bgr = cv2.cvtColor(adaptive_thresh, cv2.COLOR_GRAY2BGR)
+
+# สร้าง EasyOCR reader
+reader = easyocr.Reader(['en'])
+results = reader.readtext(
+    adaptive_bgr,
+    detail=1,
+    paragraph=False,
+    text_threshold=0.5,
+    low_text=0.3,
+    link_threshold=0.5
+)
+
+# ฟังก์ชันหาจุดศูนย์กลาง y
+def get_y_center(box):
+    return np.mean([pt[1] for pt in box])
+
+# จัดกล่องให้อยู่ในบรรทัดเดียวกัน
+def group_boxes_by_line(results, y_threshold=15):
+    lines = []
+    used = set()
+    
+    for i, (box_i, text_i, _) in enumerate(results):
+        if i in used:
+            continue
+        group = [(box_i, text_i)]
+        y_center_i = get_y_center(box_i)
+        used.add(i)
+        
+        for j, (box_j, text_j, _) in enumerate(results):
+            if j in used:
+                continue
+            y_center_j = get_y_center(box_j)
+            if abs(y_center_i - y_center_j) < y_threshold:
+                group.append((box_j, text_j))
+                used.add(j)
+        
+        lines.append(group)
+    
+    return lines
+
+# รวมข้อความและกล่องในแต่ละบรรทัด
+def merge_line_boxes(grouped_lines):
+    merged_results = []
+    for line in grouped_lines:
+        # เรียงซ้ายไปขวา
+        line = sorted(line, key=lambda x: min(pt[0] for pt in x[0]))
+        texts = [text for (_, text) in line]
+        full_text = ' '.join(texts)
+        
+        # รวมพิกัด
+        all_pts = [pt for (box, _) in line for pt in box]
+        x_min = int(min(pt[0] for pt in all_pts))
+        y_min = int(min(pt[1] for pt in all_pts))
+        x_max = int(max(pt[0] for pt in all_pts))
+        y_max = int(max(pt[1] for pt in all_pts))
+        merged_box = [(x_min, y_min), (x_max, y_max)]
+        
+        merged_results.append((merged_box, full_text))
+    return merged_results
+
+# === ประมวลผล ===
+grouped = group_boxes_by_line(results)
+merged = merge_line_boxes(grouped)
+
+# === วาดภาพ ===
+for (pt1, pt2), text in merged:
+    cv2.rectangle(cropped, pt1, pt2, (0, 255, 0), 2)
+    cv2.putText(cropped, text, (pt1[0], pt1[1] - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+
+
+# === ย่อภาพ ===
+scale_percent = 60  # ลดขนาดลง 50%
+width = int(cropped.shape[1] * scale_percent / 100)
+height = int(cropped.shape[0] * scale_percent / 100)
+resized = cv2.resize(cropped, (width, height))
+
+# แสดงภาพที่ย่อแล้ว
+cv2.imshow("Merged Bounding Boxes (Resized)", resized)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
+
+# === ฟังก์ชัน Clean Text ===
+def clean_text(text):
+    text = text.upper()
+    text = text.replace('|', '1')
+    text = text.replace('||', '11')
+    text = text.replace('Ob', '06').replace('0b', '06').replace('OB', '06').replace('0B', '06')
+    text = text.replace('O|', '01').replace('OE', '01').replace('0L', '01')
+    text = text.replace('O ', '0').replace('O', '0')
+    text = text.replace('Oq', '09').replace('OQ', '09').replace('0q', '09').replace('0Q', '09')
+    text = text.replace('TRAI', 'TRAY').replace('TRAIY', 'TRAY').replace('TRQY', 'TRAY')
+    return text.strip()
+
+# === เรียงจากบนลงล่าง ===
+results_sorted = sorted(results, key=lambda r: (min(pt[0] for pt in r[0]), min(pt[1] for pt in r[0])))
+
+# === สร้างลิสต์เพื่อเก็บผลลัพธ์ ===
+result_list = []
+
+# === ประมวลผลข้อความจากแต่ละ bounding box ===
+pattern = r'LINE\s+(\d+)\s+STACK\s+(\d+)\s+TRAY\s+(\d+)'
+
+for (_, text) in merged:
+    cleaned = clean_text(text)
+    match = re.search(pattern, cleaned)
+    if match:
+        nums = match.groups()
+        formatted = ''.join(f'{int(n):02d}' for n in nums)
+        result_list.append(formatted)
+    else:
+        # แจ้ง error พร้อมข้อความที่ไม่ตรง pattern
+        print(f"[ERROR] \"{cleaned}\"")
+        # ถ้าต้องการให้โปรแกรมหยุดทันทีเมื่อเจอ error
+        # raise ValueError(f"Pattern ไม่ตรงในข้อความ: {cleaned}")
+
+# === แสดงผลลัพธ์ ===
+for res in result_list:
+    print(res)
+
+# === เขียนผลลัพธ์ลงไฟล์ ===
+with open(output_txt_path, 'w') as f:
+    for res in result_list:
+        f.write(res + '\n')
+
+
+# === เขียนผลลัพธ์ลงไฟล์ .csv โดยเริ่มที่คอลัมน์ B ===
+with open(r"D:\OCR Code\finish.csv", mode='w', newline='', encoding='utf-8-sig') as file:
+
+    writer = csv.writer(file)
+    writer.writerow(['', 'Line', 'Stack', 'Tray'])  # เพิ่มคอลัมน์ว่างด้านหน้า
+
+    for res in result_list:
+        # สมมุติ res เป็น string 6 ตัว เช่น "010203"
+        if isinstance(res, str) and len(res) == 6:
+            line = res[0:2]
+            stack = res[2:4]
+            tray = res[4:6]
+            writer.writerow(['', line, stack, tray])  # เพิ่มคอลัมน์ว่างด้านหน้า
+
+#information from Data Matrix........................................................................................
+# อ่านข้อมูลเดิมจาก finish.csv ที่มีอยู่แล้ว
+df_finish = pd.read_csv('finish.csv')
+
+# อ่านข้อมูลจาก DataMatrix.csv
+df = pd.read_csv(r"D:\OCR Code\DataMatrix.csv", header=None)
+
+# สร้างฟังก์ชันเพื่อดึงตัวเลข 3 ตัวจากข้อความ
+def extract_numbers(text):
+    numbers = re.findall(r'\d+', text)
+    if len(numbers) == 3:
+        return pd.Series(numbers)
+    else:
+        return pd.Series([None, None, None])
+
+# ใช้ฟังก์ชันกับข้อมูลในคอลัมน์แรก
+df_extracted = df[0].apply(extract_numbers)
+df_extracted.columns = ['Line2', 'Stack2', 'Tray2']
+
+# รวมข้อมูลเก่า + ใหม่เข้าด้วยกัน (แนวแกนคอลัมน์)
+df_combined = pd.concat([df_finish, df_extracted], axis=1)
+
+# เขียนกลับไปที่ finish.csv โดยไม่ลบทับคอลัมน์เดิม
+df_combined.to_csv('finish.csv', index=False)
+
+
+#compare OCR vs Data Matrix...........................................................................................
+def compare_and_overwrite(file_path):
+    with open(file_path, newline='', encoding='utf-8') as csvfile:
+        reader = csv.reader(csvfile)
+        header = next(reader)
+
+        # กำหนดให้หัวตารางมี Compare Result และ Error Detail ที่ตำแหน่ง 7-8
+        while len(header) < 9:
+            header.append(f'Col{len(header)}')
+        header[7] = 'Compare Result'
+        header[8] = 'Error Detail'
+
+        results = []
+
+        for row in reader:
+            try:
+                # เติมค่าว่างถ้าแถวยาวไม่พอ
+                while len(row) < 7:
+                    row.append("")
+
+                line_equal = int(row[1].strip()) == int(row[4].strip())
+                stack_equal = int(row[2].strip()) == int(row[5].strip())
+                tray_equal = int(row[3].strip()) == int(row[6].strip())
+
+                if line_equal and stack_equal and tray_equal:
+                    status = "Match"
+                    error_detail = ""
+                else:
+                    status = "Not Match"
+                    errors = []
+                    if not line_equal:
+                        errors.append("line error")
+                    if not stack_equal:
+                        errors.append("stack error")
+                    if not tray_equal:
+                        errors.append("tray error")
+                    error_detail = ", ".join(errors)
+
+                # เติมช่องว่างหรือทับคอลัมน์ 6,7
+                while len(row) < 9:
+                    row.append("")
+                row[7] = status
+                row[8] = error_detail
+
+                results.append(row)
+            except IndexError:
+                while len(row) < 9:
+                    row.append("")
+                row[7] = "No Information"
+                row[8] = "IndexError"
+                results.append(row)
+
+    # เขียนกลับลงไฟล์เดิม
+    with open(file_path, 'w', newline='', encoding='utf-8') as f_out:
+        writer = csv.writer(f_out)
+        writer.writerow(header)
+        writer.writerows(results)
+
+# เรียกใช้งาน
+compare_and_overwrite(r"D:\OCR Code\finish.csv")
+
+df_final = pd.read_csv(r"D:\OCR Code\finish.csv")
+df_final.columns.values[0] = 'Code'
+
+def update_code_column(row):
+    compare = str(row.get('Compare Result', '')).strip().lower()
+    if compare == 'match':
+        try:
+            return f'="{int(row["Line"]):02d}{int(row["Stack"]):02d}{int(row["Tray"]):02d}"'
+        except:
+            return 'Not Match'
+    else:
+        return 'Not Match'
+
+df_final['Code'] = df_final['Code'].astype(object)
+df_final['Code'] = df_final.apply(update_code_column, axis=1)
+
+df_final.to_csv(r"D:\OCR Code\finish.csv", index=False)
+
+
+
+
+
