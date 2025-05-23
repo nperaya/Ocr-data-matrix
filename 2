@@ -1,0 +1,28 @@
+import csv
+
+file_path = 'your_file.csv'  # เปลี่ยนชื่อไฟล์ตามจริง
+
+with open(file_path, 'r', newline='') as f:
+    reader = csv.reader(f)
+    rows = list(reader)
+
+# สมมติไฟล์มี header อยู่ที่แถวแรก
+header = rows[0]
+# เพิ่มชื่อคอลัมน์ใหม่ (7,8,9) ถ้าต้องการ
+header.extend(['7', '8', '9'])
+
+for i in range(1, len(rows)):
+    row = rows[i]
+
+    # เช็คว่าแต่ละค่าในคอลัมน์ 1-3 เท่ากับ 4-6 ตามลำดับไหม
+    if row[0] == row[3] and row[1] == row[4] and row[2] == row[5]:
+        # ถ้าแมทช์ เอาค่า 4,5,6 มาเพิ่มในคอลัมน์ 7,8,9
+        row.extend([row[3], row[4], row[5]])
+    else:
+        # ถ้าไม่แมทช์ ใส่ error
+        row.extend(['error', 'error', 'error'])
+
+# เขียนข้อมูลกลับไปทับไฟล์เดิม
+with open(file_path, 'w', newline='') as f:
+    writer = csv.writer(f)
+    writer.writerows(rows)
